@@ -5,7 +5,7 @@
 /// All subsequent workers of the same model use the established policy.
 /// When the last worker of a model is removed, the policy mapping is cleaned up.
 use super::{
-    CacheAwareConfig, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
+    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
     RoundRobinPolicy,
 };
 use crate::config::types::PolicyConfig;
@@ -201,6 +201,7 @@ impl PolicyRegistry {
                 Arc::new(CacheAwarePolicy::with_config(cache_config))
             }
             PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
+            PolicyConfig::ConsistentHash { .. } => Arc::new(ConsistentHashPolicy::new()),
         }
     }
 

@@ -169,6 +169,15 @@ impl ConfigValidator {
                     });
                 }
             }
+            PolicyConfig::ConsistentHash { virtual_nodes } => {
+                if *virtual_nodes == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "virtual_nodes".to_string(),
+                        value: virtual_nodes.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+            }
         }
         Ok(())
     }

@@ -352,43 +352,19 @@ impl GenerationRequest for ChatCompletionRequest {
     }
 
     fn extract_text_for_routing(&self) -> String {
-        // Extract text from messages for routing decisions
-        self.messages
-            .iter()
-            .filter_map(|msg| match msg {
-                ChatMessage::System { content, .. } => Some(content.clone()),
-                ChatMessage::User { content, .. } => match content {
-                    UserMessageContent::Text(text) => Some(text.clone()),
-                    UserMessageContent::Parts(parts) => {
-                        let texts: Vec<String> = parts
-                            .iter()
-                            .filter_map(|part| match part {
-                                ContentPart::Text { text } => Some(text.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        Some(texts.join(" "))
-                    }
-                },
-                ChatMessage::Assistant {
-                    content,
-                    reasoning_content,
-                    ..
-                } => {
-                    // Combine content and reasoning content for routing decisions
-                    let main_content = content.clone().unwrap_or_default();
-                    let reasoning = reasoning_content.clone().unwrap_or_default();
-                    if main_content.is_empty() && reasoning.is_empty() {
-                        None
-                    } else {
-                        Some(format!("{} {}", main_content, reasoning).trim().to_string())
+        // Use session_id from session_params for session-based routing
+        if let Some(ref session_params) = self.session_params {
+            if let Some(session_id) = session_params.get("session_id") {
+                if let Some(session_id_str) = session_id.as_str() {
+                    if !session_id_str.trim().is_empty() {
+                        return session_id_str.to_string();
                     }
                 }
-                ChatMessage::Tool { content, .. } => Some(content.clone()),
-                ChatMessage::Function { content, .. } => Some(content.clone()),
-            })
-            .collect::<Vec<String>>()
-            .join(" ")
+            }
+        }
+
+        // Return empty string if no session_id - let routing policy handle this case
+        String::new()
     }
 }
 

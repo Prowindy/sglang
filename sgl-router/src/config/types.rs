@@ -195,6 +195,12 @@ pub enum PolicyConfig {
         /// Interval for load monitoring (seconds)
         load_check_interval_secs: u64,
     },
+
+    #[serde(rename = "consistent_hash")]
+    ConsistentHash {
+        /// Number of virtual nodes per worker for better distribution
+        virtual_nodes: u32,
+    },
 }
 
 impl PolicyConfig {
@@ -204,6 +210,7 @@ impl PolicyConfig {
             PolicyConfig::RoundRobin => "round_robin",
             PolicyConfig::CacheAware { .. } => "cache_aware",
             PolicyConfig::PowerOfTwo { .. } => "power_of_two",
+            PolicyConfig::ConsistentHash { .. } => "consistent_hash",
         }
     }
 }

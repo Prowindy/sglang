@@ -1,7 +1,7 @@
 //! Factory for creating load balancing policies
 
 use super::{
-    CacheAwareConfig, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
+    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
     RoundRobinPolicy,
 };
 use crate::config::PolicyConfig;
@@ -33,6 +33,11 @@ impl PolicyFactory {
                 };
                 Arc::new(CacheAwarePolicy::with_config(config))
             }
+            PolicyConfig::ConsistentHash { virtual_nodes: _ } => {
+                // Note: virtual_nodes parameter is available but not currently used
+                // The consistent hash policy uses a hardcoded value for now
+                Arc::new(ConsistentHashPolicy::new())
+            }
         }
     }
 
@@ -43,6 +48,7 @@ impl PolicyFactory {
             "round_robin" | "roundrobin" => Some(Arc::new(RoundRobinPolicy::new())),
             "power_of_two" | "poweroftwo" => Some(Arc::new(PowerOfTwoPolicy::new())),
             "cache_aware" | "cacheaware" => Some(Arc::new(CacheAwarePolicy::new())),
+            "consistent_hash" | "consistenthash" => Some(Arc::new(ConsistentHashPolicy::new())),
             _ => None,
         }
     }
@@ -77,6 +83,12 @@ mod tests {
             max_tree_size: 1000,
         });
         assert_eq!(policy.name(), "cache_aware");
+
+        // Test ConsistentHash
+        let policy = PolicyFactory::create_from_config(&PolicyConfig::ConsistentHash {
+            virtual_nodes: 160,
+        });
+        assert_eq!(policy.name(), "consistent_hash");
     }
 
     #[test]
@@ -89,6 +101,8 @@ mod tests {
         assert!(PolicyFactory::create_by_name("PowerOfTwo").is_some());
         assert!(PolicyFactory::create_by_name("cache_aware").is_some());
         assert!(PolicyFactory::create_by_name("CacheAware").is_some());
+        assert!(PolicyFactory::create_by_name("consistent_hash").is_some());
+        assert!(PolicyFactory::create_by_name("ConsistentHash").is_some());
         assert!(PolicyFactory::create_by_name("unknown").is_none());
     }
 }

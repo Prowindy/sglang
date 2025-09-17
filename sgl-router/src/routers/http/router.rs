@@ -68,6 +68,7 @@ impl Router {
         let worker_urls = if ctx.router_config.dp_aware {
             // worker address now in the format of "http://host:port@dp_rank"
             Self::get_dp_aware_workers(&worker_urls, &ctx.router_config.api_key)
+                .await
                 .map_err(|e| format!("Failed to get dp-aware workers: {}", e))?
         } else {
             worker_urls
@@ -284,18 +285,19 @@ impl Router {
         }
     }
 
-    fn get_worker_dp_size(worker_url: &str, api_key: &Option<String>) -> Result<usize, String> {
-        let sync_client = reqwest::blocking::Client::new();
-        let mut req_builder = sync_client.get(format!("{}/get_server_info", worker_url));
+    async fn get_worker_dp_size(worker_url: &str, api_key: &Option<String>) -> Result<usize, String> {
+        let client = reqwest::Client::new();
+        let mut req_builder = client.get(format!("{}/get_server_info", worker_url));
         if let Some(key) = api_key {
             req_builder = req_builder.bearer_auth(key);
         }
 
-        match req_builder.send() {
+        match req_builder.send().await {
             Ok(res) => {
                 if res.status().is_success() {
                     let server_info = res
                         .text()
+                        .await
                         .map_err(|e| format!("failed to read text from response: {}", e))?;
 
                     let server_info: serde_json::Value = serde_json::from_str(&server_info)
@@ -320,17 +322,18 @@ impl Router {
     }
 
     // Given a list of workers, return a list of workers with dp_rank as suffix
-    fn get_dp_aware_workers(
+    async fn get_dp_aware_workers(
         worker_urls: &[String],
         api_key: &Option<String>,
     ) -> Result<Vec<String>, String> {
         let mut dp_aware_workers: Vec<String> = Vec::new();
 
         for url in worker_urls {
-            match Self::get_worker_dp_size(url, api_key) {
+            match Self::get_worker_dp_size(url, api_key).await {
                 Ok(dp_size) => {
-                    for i in 0..dp_size {
-                        dp_aware_workers.push(format!("{}@{}", url, i));
+                    // Use all available DP ranks for consistent hashing validation
+                    for rank in 0..dp_size {
+                        dp_aware_workers.push(format!("{}@{}", url, rank));
                     }
                 }
                 Err(e) => return Err(format!("Failed to get DP size for {}: {}", url, e)),
@@ -865,6 +868,7 @@ impl Router {
             let registry = Arc::clone(&self.worker_registry);
             let worker_url = worker_url.to_string();
 
+
             // Preserve headers for streaming response
             let mut response_headers = header_utils::preserve_response_headers(res.headers());
             // Ensure we set the correct content-type for SSE
@@ -982,6 +986,7 @@ impl Router {
                             // and add them as multiple workers
                             let url_vec = vec![String::from(worker_url)];
                             let dp_url_vec = Self::get_dp_aware_workers(&url_vec, &self.api_key)
+                                .await
                                 .map_err(|e| format!("Failed to get dp-aware workers: {}", e))?;
                             let mut worker_added: bool = false;
                             for dp_url in &dp_url_vec {
