@@ -1,7 +1,7 @@
 //! Factory for creating router instances
 
 use super::{
-    http::{openai_router::OpenAIRouter, pd_router::PDRouter, router::Router},
+    http::{openai_router::OpenAIRouter, pd_router::PDRouter, router::Router, vllm_pd_router::VllmPDRouter},
     RouterTrait,
 };
 use crate::config::{ConnectionMode, PolicyConfig, RoutingMode};
@@ -39,6 +39,15 @@ impl RouterFactory {
                         )
                         .await
                     }
+                    RoutingMode::VllmPrefillDecode {
+                        prefill_urls,
+                        decode_urls,
+                        prefill_policy,
+                        decode_policy,
+                        discovery_address: _,
+                    } => {
+                        Err("vLLM PD mode requires HTTP connection_mode".to_string())
+                    }
                     RoutingMode::OpenAI { .. } => {
                         Err("OpenAI mode requires HTTP connection_mode".to_string())
                     }
@@ -56,6 +65,7 @@ impl RouterFactory {
                         prefill_policy,
                         decode_policy,
                     } => {
+                        tracing::info!("Creating regular PDRouter with prefill_urls: {:?}, decode_urls: {:?}", prefill_urls, decode_urls);
                         Self::create_pd_router(
                             prefill_urls,
                             decode_urls,
@@ -65,6 +75,30 @@ impl RouterFactory {
                             ctx,
                         )
                         .await
+                    }
+                    RoutingMode::VllmPrefillDecode {
+                        prefill_urls: _,
+                        decode_urls: _,
+                        prefill_policy,
+                        decode_policy,
+                        discovery_address,
+                    } => {
+                        match discovery_address {
+                            Some(addr) => {
+                                tracing::info!("Creating VllmPDRouter with pure service discovery on: {}", addr);
+                                Self::create_vllm_pd_router(
+                                    addr.clone(),
+                                    prefill_policy.as_ref(),
+                                    decode_policy.as_ref(),
+                                    &ctx.router_config.policy,
+                                    ctx,
+                                )
+                                .await
+                            }
+                            None => {
+                                Err("vLLM PD mode requires --vllm-discovery-address for service discovery".to_string())
+                            }
+                        }
                     }
                     RoutingMode::OpenAI { worker_urls, .. } => {
                         Self::create_openai_router(worker_urls.clone(), ctx).await
@@ -106,6 +140,32 @@ impl RouterFactory {
 
         // Create PD router with context (policies are in PolicyRegistry)
         let router = PDRouter::new(prefill_urls.to_vec(), decode_urls.to_vec(), ctx).await?;
+
+        Ok(Box::new(router))
+    }
+
+    /// Create a vLLM PD router with pure service discovery
+    pub async fn create_vllm_pd_router(
+        discovery_address: String,
+        prefill_policy_config: Option<&PolicyConfig>,
+        decode_policy_config: Option<&PolicyConfig>,
+        main_policy_config: &PolicyConfig,
+        ctx: &Arc<AppContext>,
+    ) -> Result<Box<dyn RouterTrait>, String> {
+        // Initialize policies in PolicyRegistry - use specific policies if provided, otherwise fall back to main policy
+        let prefill_policy =
+            PolicyFactory::create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
+        let decode_policy =
+            PolicyFactory::create_from_config(decode_policy_config.unwrap_or(main_policy_config));
+
+        // Set the prefill and decode policies in the registry
+        ctx.policy_registry.set_prefill_policy(prefill_policy);
+        ctx.policy_registry.set_decode_policy(decode_policy);
+
+        // Create vLLM PD router with pure service discovery
+        tracing::info!("About to create VllmPDRouter instance with pure service discovery");
+        let router = VllmPDRouter::new(discovery_address, ctx).await?;
+        tracing::info!("VllmPDRouter instance created successfully");
 
         Ok(Box::new(router))
     }

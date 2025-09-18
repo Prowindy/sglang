@@ -10,6 +10,7 @@ use sglang_router_rs::service_discovery::ServiceDiscoveryConfig;
 use std::collections::HashMap;
 
 // Helper function to parse prefill arguments from command line
+// Returns prefill_entries with (URL, optional_bootstrap_port)
 fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
     let mut prefill_entries = Vec::new();
@@ -18,6 +19,7 @@ fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     while i < args.len() {
         if args[i] == "--prefill" && i + 1 < args.len() {
             let url = args[i + 1].clone();
+
             let bootstrap_port = if i + 2 < args.len() && !args[i + 2].starts_with("--") {
                 // Check if next arg is a port number
                 if let Ok(port) = args[i + 2].parse::<u16>() {
@@ -40,6 +42,25 @@ fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     }
 
     prefill_entries
+}
+
+/// Parse decode arguments
+fn parse_decode_args() -> Vec<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut decode_entries = Vec::new();
+    let mut i = 0;
+
+    while i < args.len() {
+        if args[i] == "--decode" && i + 1 < args.len() {
+            let url = args[i + 1].clone();
+            decode_entries.push(url);
+            i += 2; // Skip --decode and URL
+        } else {
+            i += 1;
+        }
+    }
+
+    decode_entries
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -99,6 +120,15 @@ Examples:
     --decode http://127.0.0.4:30004 \
     --prefill-policy cache_aware --decode-policy power_of_two
 
+  # vLLM PD mode with pure service discovery (workers register themselves)
+  sglang-router --vllm-pd-disaggregation \
+    --vllm-discovery-address 0.0.0.0:30001 \
+    --policy consistent_hash
+
+  # Note: In vLLM mode, prefill/decode workers automatically register their
+  # HTTP and ZMQ addresses via service discovery. No static --prefill or
+  # --decode parameters are needed.
+
 "#)]
 struct CliArgs {
     /// Host address to bind the router server
@@ -120,6 +150,15 @@ struct CliArgs {
     /// Enable PD (Prefill-Decode) disaggregated mode
     #[arg(long, default_value_t = false)]
     pd_disaggregation: bool,
+
+    /// Enable vLLM PD (Prefill-Decode) disaggregated mode with vLLM-specific two-stage processing
+    #[arg(long, default_value_t = false)]
+    vllm_pd_disaggregation: bool,
+
+    /// ZMQ service discovery address for vLLM P2P NCCL coordination (e.g., "0.0.0.0:30001")
+    /// Required for --vllm-pd-disaggregation mode. Workers register their HTTP and ZMQ addresses here.
+    #[arg(long)]
+    vllm_discovery_address: Option<String>,
 
     /// Decode server URL (can be specified multiple times)
     #[arg(long, action = ArgAction::Append)]
@@ -372,6 +411,13 @@ impl CliArgs {
         &self,
         prefill_urls: Vec<(String, Option<u16>)>,
     ) -> ConfigResult<RouterConfig> {
+        // Validate mutually exclusive modes
+        if self.pd_disaggregation && self.vllm_pd_disaggregation {
+            return Err(ConfigError::ValidationFailed {
+                reason: "Cannot enable both --pd-disaggregation and --vllm-pd-disaggregation".to_string(),
+            });
+        }
+
         // Determine routing mode
         let mode = if self.enable_igw {
             // IGW mode - routing mode is not used in IGW, but we need to provide a placeholder
@@ -398,6 +444,47 @@ impl CliArgs {
                 decode_urls,
                 prefill_policy: self.prefill_policy.as_ref().map(|p| self.parse_policy(p)),
                 decode_policy: self.decode_policy.as_ref().map(|p| self.parse_policy(p)),
+            }
+        } else if self.vllm_pd_disaggregation {
+            // Parse decode URLs to check for unused parameters
+            let decode_urls = parse_decode_args();
+
+            // Warn about unused parameters in vLLM pure service discovery mode
+            if !prefill_urls.is_empty() {
+                eprintln!("⚠️  WARNING: --prefill parameters are ignored in vLLM mode. Workers register via service discovery.");
+                for (url, port) in &prefill_urls {
+                    match port {
+                        Some(p) => eprintln!("   Ignored: --prefill {} {}", url, p),
+                        None => eprintln!("   Ignored: --prefill {}", url),
+                    }
+                }
+            }
+            if !decode_urls.is_empty() {
+                eprintln!("⚠️  WARNING: --decode parameters are ignored in vLLM mode. Workers register via service discovery.");
+                for url in &decode_urls {
+                    eprintln!("   Ignored: --decode {}", url);
+                }
+            }
+            if !self.decode.is_empty() {
+                eprintln!("⚠️  WARNING: --decode parameters are ignored in vLLM mode. Workers register via service discovery.");
+                for url in &self.decode {
+                    eprintln!("   Ignored: --decode {}", url);
+                }
+            }
+
+            // Require discovery address for vLLM mode
+            if self.vllm_discovery_address.is_none() {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "vLLM PD disaggregation mode requires --vllm-discovery-address for pure service discovery".to_string(),
+                });
+            }
+
+            RoutingMode::VllmPrefillDecode {
+                prefill_urls: vec![], // Always empty in pure service discovery mode
+                decode_urls: vec![],  // Always empty in pure service discovery mode
+                prefill_policy: self.prefill_policy.as_ref().map(|p| self.parse_policy(p)),
+                decode_policy: self.decode_policy.as_ref().map(|p| self.parse_policy(p)),
+                discovery_address: self.vllm_discovery_address.clone(),
             }
         } else {
             // Regular mode
@@ -444,6 +531,16 @@ impl CliArgs {
                 all_urls.extend(worker_urls.clone());
             }
             RoutingMode::PrefillDecode {
+                prefill_urls,
+                decode_urls,
+                ..
+            } => {
+                for (url, _) in prefill_urls {
+                    all_urls.push(url.clone());
+                }
+                all_urls.extend(decode_urls.clone());
+            }
+            RoutingMode::VllmPrefillDecode {
                 prefill_urls,
                 decode_urls,
                 ..
@@ -566,18 +663,25 @@ impl CliArgs {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("DEBUG: Main function started");
+
     // Parse prefill arguments manually before clap parsing
+    println!("DEBUG: Parsing prefill arguments");
     let prefill_urls = parse_prefill_args();
+    println!("DEBUG: Prefill URLs parsed: {:?}", prefill_urls);
 
     // Filter out prefill arguments and their values before passing to clap
+    println!("DEBUG: Filtering CLI arguments");
     let mut filtered_args: Vec<String> = Vec::new();
     let raw_args: Vec<String> = std::env::args().collect();
+    println!("DEBUG: Raw args: {:?}", raw_args);
     let mut i = 0;
 
     while i < raw_args.len() {
         if raw_args[i] == "--prefill" && i + 1 < raw_args.len() {
             // Skip --prefill and its URL
             i += 2;
+
             // Also skip bootstrap port if present
             if i < raw_args.len()
                 && !raw_args[i].starts_with("--")
@@ -592,7 +696,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Parse CLI arguments with clap using filtered args
+    println!("DEBUG: Parsing CLI arguments with clap");
+    println!("DEBUG: Filtered args: {:?}", filtered_args);
     let cli_args = CliArgs::parse_from(filtered_args);
+    println!("DEBUG: CLI args parsed successfully");
+    println!("DEBUG: pd_disaggregation: {}", cli_args.pd_disaggregation);
+    println!("DEBUG: vllm_pd_disaggregation: {}", cli_args.vllm_pd_disaggregation);
 
     // Print startup info
     println!("SGLang Router starting...");
@@ -601,6 +710,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "IGW (Inference Gateway)".to_string()
     } else if matches!(cli_args.backend, Backend::Openai) {
         "OpenAI Backend".to_string()
+    } else if cli_args.vllm_pd_disaggregation {
+        "vLLM PD Disaggregated".to_string()
     } else if cli_args.pd_disaggregation {
         "PD Disaggregated".to_string()
     } else {
@@ -630,18 +741,28 @@ Provide --worker-urls or PD flags as usual.",
     }
 
     // Convert to RouterConfig
+    println!("DEBUG: Converting to RouterConfig");
     let router_config = cli_args.to_router_config(prefill_urls)?;
+    println!("DEBUG: RouterConfig created successfully");
 
     // Validate configuration
+    println!("DEBUG: Validating configuration");
     router_config.validate()?;
+    println!("DEBUG: Configuration validated successfully");
 
     // Create ServerConfig
+    println!("DEBUG: Creating ServerConfig");
+    println!("DEBUG: CLI host: {}, port: {}", cli_args.host, cli_args.port);
     let server_config = cli_args.to_server_config(router_config);
+    println!("DEBUG: ServerConfig created successfully - host: {}, port: {}", server_config.host, server_config.port);
 
     // Create a new runtime for the server (like Python binding does)
+    println!("DEBUG: Creating Tokio runtime");
     let runtime = tokio::runtime::Runtime::new()?;
+    println!("DEBUG: Tokio runtime created successfully");
 
     // Block on the async startup function
+    println!("DEBUG: Starting server startup function");
     runtime.block_on(async move { server::startup(server_config).await })?;
 
     Ok(())

@@ -123,17 +123,42 @@ pub enum RoutingMode {
         /// OpenAI-compatible API base(s), provided via worker URLs
         worker_urls: Vec<String>,
     },
+    #[serde(rename = "vllm_prefill_decode")]
+    VllmPrefillDecode {
+        /// Prefill worker URLs with optional bootstrap ports
+        prefill_urls: Vec<(String, Option<u16>)>,
+        /// Decode worker URLs
+        decode_urls: Vec<String>,
+        /// Optional separate policy for prefill workers
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prefill_policy: Option<PolicyConfig>,
+        /// Optional separate policy for decode workers
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decode_policy: Option<PolicyConfig>,
+        /// ZMQ service discovery address (e.g., "0.0.0.0:30001")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        discovery_address: Option<String>,
+    },
 }
 
 impl RoutingMode {
     pub fn is_pd_mode(&self) -> bool {
-        matches!(self, RoutingMode::PrefillDecode { .. })
+        matches!(self, RoutingMode::PrefillDecode { .. } | RoutingMode::VllmPrefillDecode { .. })
+    }
+
+    pub fn is_vllm_pd_mode(&self) -> bool {
+        matches!(self, RoutingMode::VllmPrefillDecode { .. })
     }
 
     pub fn worker_count(&self) -> usize {
         match self {
             RoutingMode::Regular { worker_urls } => worker_urls.len(),
             RoutingMode::PrefillDecode {
+                prefill_urls,
+                decode_urls,
+                ..
+            } => prefill_urls.len() + decode_urls.len(),
+            RoutingMode::VllmPrefillDecode {
                 prefill_urls,
                 decode_urls,
                 ..
@@ -150,6 +175,9 @@ impl RoutingMode {
             RoutingMode::PrefillDecode { prefill_policy, .. } => {
                 prefill_policy.as_ref().unwrap_or(main_policy)
             }
+            RoutingMode::VllmPrefillDecode { prefill_policy, .. } => {
+                prefill_policy.as_ref().unwrap_or(main_policy)
+            }
             _ => main_policy,
         }
     }
@@ -159,6 +187,9 @@ impl RoutingMode {
     pub fn get_decode_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
         match self {
             RoutingMode::PrefillDecode { decode_policy, .. } => {
+                decode_policy.as_ref().unwrap_or(main_policy)
+            }
+            RoutingMode::VllmPrefillDecode { decode_policy, .. } => {
                 decode_policy.as_ref().unwrap_or(main_policy)
             }
             _ => main_policy,
@@ -412,6 +443,7 @@ impl RouterConfig {
         match self.mode {
             RoutingMode::Regular { .. } => "regular",
             RoutingMode::PrefillDecode { .. } => "prefill_decode",
+            RoutingMode::VllmPrefillDecode { .. } => "vllm_prefill_decode",
             RoutingMode::OpenAI { .. } => "openai",
         }
     }

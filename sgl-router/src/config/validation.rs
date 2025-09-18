@@ -6,8 +6,9 @@ pub struct ConfigValidator;
 impl ConfigValidator {
     /// Validate a complete router configuration
     pub fn validate(config: &RouterConfig) -> ConfigResult<()> {
-        // Check if service discovery is enabled
-        let has_service_discovery = config.discovery.as_ref().is_some_and(|d| d.enabled);
+        // Check if service discovery is enabled (either via discovery config or vLLM mode)
+        let has_service_discovery = config.discovery.as_ref().is_some_and(|d| d.enabled)
+            || matches!(&config.mode, RoutingMode::VllmPrefillDecode { discovery_address: Some(_), .. });
 
         Self::validate_mode(&config.mode, has_service_discovery)?;
         Self::validate_policy(&config.policy)?;
@@ -60,6 +61,58 @@ impl ConfigValidator {
                     if decode_urls.is_empty() {
                         return Err(ConfigError::ValidationFailed {
                             reason: "PD mode requires at least one decode worker URL".to_string(),
+                        });
+                    }
+                }
+
+                // Validate URLs if any are provided
+                if !prefill_urls.is_empty() {
+                    let prefill_url_strings: Vec<String> =
+                        prefill_urls.iter().map(|(url, _)| url.clone()).collect();
+                    Self::validate_urls(&prefill_url_strings)?;
+                }
+                if !decode_urls.is_empty() {
+                    Self::validate_urls(decode_urls)?;
+                }
+
+                // Validate bootstrap ports
+                for (_url, port) in prefill_urls {
+                    if let Some(port) = port {
+                        if *port == 0 {
+                            return Err(ConfigError::InvalidValue {
+                                field: "bootstrap_port".to_string(),
+                                value: port.to_string(),
+                                reason: "Port must be between 1 and 65535".to_string(),
+                            });
+                        }
+                    }
+                }
+
+                // Validate optional prefill and decode policies
+                if let Some(p_policy) = prefill_policy {
+                    Self::validate_policy(p_policy)?;
+                }
+                if let Some(d_policy) = decode_policy {
+                    Self::validate_policy(d_policy)?;
+                }
+            }
+            RoutingMode::VllmPrefillDecode {
+                prefill_urls,
+                decode_urls,
+                prefill_policy,
+                decode_policy,
+                discovery_address: _,
+            } => {
+                // Only require URLs if service discovery is disabled
+                if !has_service_discovery {
+                    if prefill_urls.is_empty() {
+                        return Err(ConfigError::ValidationFailed {
+                            reason: "vLLM PD mode requires at least one prefill worker URL".to_string(),
+                        });
+                    }
+                    if decode_urls.is_empty() {
+                        return Err(ConfigError::ValidationFailed {
+                            reason: "vLLM PD mode requires at least one decode worker URL".to_string(),
                         });
                     }
                 }
@@ -263,6 +316,13 @@ impl ConfigValidator {
                 if discovery.prefill_selector.is_empty() && discovery.decode_selector.is_empty() {
                     return Err(ConfigError::ValidationFailed {
                         reason: "PD mode with service discovery requires at least one non-empty selector (prefill or decode)".to_string(),
+                    });
+                }
+            }
+            RoutingMode::VllmPrefillDecode { .. } => {
+                if discovery.prefill_selector.is_empty() && discovery.decode_selector.is_empty() {
+                    return Err(ConfigError::ValidationFailed {
+                        reason: "vLLM PD mode with service discovery requires at least one non-empty selector (prefill or decode)".to_string(),
                     });
                 }
             }

@@ -534,9 +534,12 @@ pub fn build_app(
 }
 
 pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    println!("DEBUG: Server startup function called");
+
     // Only initialize logging if not already done (for Python bindings support)
     static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+    println!("DEBUG: Initializing logging");
     let _log_guard = if !LOGGING_INITIALIZED.swap(true, Ordering::SeqCst) {
         Some(logging::init_logging(LoggingConfig {
             level: config
@@ -559,11 +562,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     } else {
         None
     };
+    println!("DEBUG: Logging initialized");
 
     // Initialize prometheus metrics exporter
+    println!("DEBUG: Initializing Prometheus metrics");
     if let Some(prometheus_config) = config.prometheus_config {
         metrics::start_prometheus(prometheus_config);
     }
+    println!("DEBUG: Prometheus metrics initialized");
 
     info!(
         "Starting router on {}:{} | mode: {:?} | policy: {:?} | max_payload: {}MB",
@@ -574,6 +580,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         config.max_payload_size / (1024 * 1024)
     );
 
+    println!("DEBUG: Creating HTTP client");
     let client = Client::builder()
         .pool_idle_timeout(Some(Duration::from_secs(50)))
         .pool_max_idle_per_host(500)
@@ -583,14 +590,17 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .build()
         .expect("Failed to create HTTP client");
+    println!("DEBUG: HTTP client created");
 
     // Create the application context with all dependencies
+    println!("DEBUG: Creating AppContext");
     let app_context = AppContext::new(
         config.router_config.clone(),
         client.clone(),
         config.router_config.max_concurrent_requests,
         config.router_config.rate_limit_tokens_per_second,
     )?;
+    println!("DEBUG: AppContext created");
 
     let app_context = Arc::new(app_context);
 
